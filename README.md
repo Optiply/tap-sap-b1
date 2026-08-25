@@ -2,8 +2,6 @@
 
 Read-only Singer tap for SAP Business One Service Layer, built with `hotglue_singer_sdk`.
 
-The stream scope mirrors the active Paco Verpakkingen Alumio integration exported on 2026-08-25.
-
 ## Streams
 
 | Stream | Service Layer endpoint | Primary key | Replication |
@@ -59,4 +57,3 @@ For a bounded sync, select one stream in the catalog and use a recent `start_dat
 
 - SAP Business One Service Layer API Reference: <https://help.sap.com/doc/056f69366b5345a386bb8149f1700c19/10.0/en-US/Service%20Layer%20API%20Reference.html>
 - SAP Business One Service Layer guide: <https://help.sap.com/doc/fc2f5477516c404c8bf9ad1315a17238/10.0/en-US/Working_with_SAP_Business_One_Service_Layer.pdf>
-- Source integration: `PacoVerpakkingen_SAPBusinessOne.ndjson` (local operator-approved path; credentials are not copied into this repository).
