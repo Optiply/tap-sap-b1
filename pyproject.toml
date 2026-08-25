@@ -1,0 +1,33 @@
+[build-system]
+requires = ["hatchling>=1,<2"]
+build-backend = "hatchling.build"
+
+[project]
+name = "tap-sap-b1"
+version = "0.1.0"
+description = "Read-only Singer tap for SAP Business One Service Layer"
+readme = "README.md"
+requires-python = ">=3.10,<3.12"
+license = { text = "Apache-2.0" }
+authors = [{ name = "Hotglue" }]
+dependencies = [
+  "hotglue-etl-exceptions==0.1.0",
+  "hotglue-singer-sdk>=1.0.26",
+  "requests>=2.32,<3",
+]
+
+[project.optional-dependencies]
+test = ["pytest>=8"]
+
+[project.scripts]
+tap-sap-b1 = "tap_sap_b1.tap:TapSAPB1.cli"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
+
+[tool.ruff]
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]

@@ -1,0 +1,6 @@
+{
+  "venvPath": ".",
+  "venv": ".venv",
+  "pythonVersion": "3.11",
+  "include": ["tap_sap_b1", "tests"]
+}

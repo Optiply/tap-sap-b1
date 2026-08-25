@@ -1,0 +1,27 @@
+version: 1
+send_anonymous_usage_stats: false
+project_id: tap-sap-b1
+default_environment: test
+environments:
+  - name: test
+plugins:
+  extractors:
+    - name: tap-sap-b1
+      namespace: tap_sap_b1
+      pip_url: -e .
+      capabilities: [state, catalog, discover, about, stream-maps]
+      settings:
+        - name: api_url
+        - name: company_db
+          kind: password
+        - name: username
+          kind: password
+        - name: password
+          kind: password
+        - name: start_date
+          kind: date_iso8601
+        - name: verify_ssl
+          kind: boolean
+        - name: ca_bundle
+        - name: request_timeout
+          kind: integer
