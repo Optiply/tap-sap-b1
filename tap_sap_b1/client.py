@@ -14,6 +14,12 @@ from hotglue_singer_sdk import RESTStream
 from hotglue_singer_sdk.authenticators import APIAuthenticatorBase
 from hotglue_singer_sdk.exceptions import FatalAPIError, RetriableAPIError
 
+#: Records per request when nothing is configured.
+DEFAULT_PAGE_SIZE = 500
+#: Seconds before a Service Layer request is abandoned.
+DEFAULT_REQUEST_TIMEOUT = 300
+#: Appended to api_url when it carries no Service Layer path.
+DEFAULT_SERVICE_LAYER_PATH = "/b1s/v1"
 
 def page_offset(value: Any | None) -> int:
     """Validate and normalize an OData offset token."""
@@ -65,10 +71,11 @@ class SAPSessionAuthenticator(APIAuthenticatorBase):
         self._auth_headers = {"Cookie": self._login()}
 
     def _login(self) -> str:
+        login_url = f"{self._stream.url_base}/Login"
         for attempt in range(5):
             try:
                 response = self._stream.requests_session.post(
-                    f"{self._stream.url_base}/Login",
+                    login_url,
                     json={
                         "CompanyDB": self.config["company_db"],
                         "UserName": self.config["username"],
@@ -92,6 +99,12 @@ class SAPSessionAuthenticator(APIAuthenticatorBase):
                 delay = retry_after_seconds(response.headers.get("Retry-After")) or 2**attempt
                 time.sleep(delay)
                 continue
+            if response.status_code == 404:
+                raise FatalAPIError(
+                    f"SAP Business One login failed with HTTP 404 at {login_url}. "
+                    "api_url must point at the Service Layer root, for example "
+                    "https://host:50000/b1s/v1"
+                )
             if response.status_code >= 400:
                 raise FatalAPIError(
                     f"SAP Business One login failed with HTTP {response.status_code}"
@@ -118,7 +131,7 @@ class SAPB1Stream(RESTStream):
     records_jsonpath = "$.value[*]"
     default_replication_key: str | None = None
     default_schema: dict[str, Any] = {}
-    page_size = 500
+    default_page_size = DEFAULT_PAGE_SIZE
     select_fields: tuple[str, ...] = ()
     fixed_filter: str | None = None
     default_primary_keys: tuple[str, ...] = ()
@@ -137,15 +150,43 @@ class SAPB1Stream(RESTStream):
         parsed = urlsplit(value)
         if parsed.scheme not in {"http", "https"} or not parsed.netloc:
             raise FatalAPIError("api_url must be an absolute HTTP(S) Service Layer URL")
-        return value.rstrip("/")
+        base = value.rstrip("/")
+        if "/b1s/" not in f"{urlsplit(base).path}/":
+            self.logger.warning(
+                "api_url has no Service Layer path; assuming %s. Set api_url to the "
+                "Service Layer root (for example https://host:50000/b1s/v1) to pin "
+                "the version.",
+                DEFAULT_SERVICE_LAYER_PATH,
+            )
+            base = f"{base}{DEFAULT_SERVICE_LAYER_PATH}"
+        return base
 
     @property
     def timeout(self) -> int:
-        value = self.config.get("request_timeout", 30)
+        value = self.config.get("request_timeout", DEFAULT_REQUEST_TIMEOUT)
         try:
             return int(value)
         except (TypeError, ValueError) as exc:
             raise FatalAPIError(f"Invalid request_timeout: {value!r}") from exc
+
+    @property
+    def page_size(self) -> int:
+        """Records per request: per-stream config, then global, then the default."""
+        per_stream = self.config.get("page_sizes") or {}
+        value = None
+        if isinstance(per_stream, dict):
+            value = per_stream.get(self.name)
+        if value is None:
+            value = self.config.get("page_size")
+        if value is None:
+            return self.default_page_size
+        try:
+            page_size = int(value)
+        except (TypeError, ValueError) as exc:
+            raise FatalAPIError(f"Invalid page size for {self.name}: {value!r}") from exc
+        if page_size < 1:
+            raise FatalAPIError(f"Invalid page size for {self.name}: {value!r}")
+        return page_size
 
     @property
     def verify(self) -> bool | str:
@@ -183,10 +224,12 @@ class SAPB1Stream(RESTStream):
         params: dict[str, Any] = {
             "$top": self.page_size,
             "$skip": page_offset(next_page_token) if not isinstance(next_page_token, dict) else 0,
-            "$orderby": ",".join(
-                filter(None, (self.replication_key, *(self.primary_keys or [])))
-            ),
         }
+        # U_last_changed is an unindexed UDF; sorting on it makes SAP sort the
+        # whole table before returning a page. The primary key is unique, so
+        # paging stays stable without it.
+        if orderby := ",".join(self.primary_keys or ()):
+            params["$orderby"] = orderby
         if self.select_fields:
             params["$select"] = ",".join(self.select_fields)
         if filters:
