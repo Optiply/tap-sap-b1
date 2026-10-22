@@ -61,9 +61,12 @@ class TapSAPB1(Tap):
         th.Property(
             "request_timeout",
             th.IntegerType,
-            default=30,
+            default=300,
             description="Per-request timeout in seconds",
         ),
+        th.Property("page_size", th.IntegerType),
+        th.Property("page_sizes", th.ObjectType()),
+        th.Property("include_warehouse_stock", th.BooleanType, default=True),
     ).to_dict()
 
     @staticmethod
