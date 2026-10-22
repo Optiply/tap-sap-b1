@@ -74,8 +74,12 @@ class ProductsStream(SAPB1Stream):
     path = "/Items"
     default_replication_key = "U_last_changed"
     default_primary_keys = ("ItemCode",)
-    page_size = 2500
-    select_fields = (
+    #: Items carry three child collections, so pages are expensive to build.
+    default_page_size = 500
+    #: Per-warehouse stock: the heaviest part of an item page by far. Optiply
+    #: only needs the totals, so it can be switched off per connection.
+    warehouse_stock_field = "ItemWarehouseInfoCollection"
+    all_select_fields = (
         "ItemCode",
         "PurchaseItem",
         "QuantityOnStock",
@@ -101,6 +105,16 @@ class ProductsStream(SAPB1Stream):
         "PurchaseUnitVolume",
         "U_last_changed",
     )
+
+    @property
+    def select_fields(self) -> tuple[str, ...]:
+        """Return the item fields to request, honouring include_warehouse_stock."""
+        if self.config.get("include_warehouse_stock", True):
+            return self.all_select_fields
+        return tuple(
+            field for field in self.all_select_fields if field != self.warehouse_stock_field
+        )
+
     default_schema = th.PropertiesList(
         th.Property("ItemCode", th.StringType),
         th.Property("PurchaseItem", th.StringType),
@@ -136,7 +150,7 @@ class SuppliersStream(SAPB1Stream):
     path = "/BusinessPartners"
     default_replication_key = "UpdateDate"
     default_primary_keys = ("CardCode",)
-    page_size = 500
+    default_page_size = 500
     fixed_filter = "CardType eq 'cSupplier'"
     select_fields = (
         "CardName",
@@ -199,7 +213,8 @@ class SalesOrdersStream(SAPB1Stream):
     name = "sales_orders"
     path = "/Orders"
     default_primary_keys = ("DocEntry",)
-    page_size = 2500
+    #: Orders carry DocumentLines, so keep pages modest.
+    default_page_size = 500
     fixed_filter = "DocumentStatus eq 'bost_Close'"
     select_fields = _DOCUMENT_FIELDS
     default_schema = _document_schema
