@@ -279,23 +279,21 @@ class InventoryTransferRequestsStream(SAPB1Stream):
     path = "/InventoryTransferRequests"
     fixed_filter = "DocumentStatus eq 'bost_Open'"
     default_primary_keys = ("DocEntry",)
+    #: InventoryTransferRequest is not a marketing document (it is OWTQ, not
+    #: ODLN/ORDR), so it does not carry the full Document field set. Only
+    #: fields the Alumio integration proved against this system are requested;
+    #: an unknown one makes SAP reject the whole request with a 400.
     select_fields = (
         "DocEntry",
         "DocNum",
         "DocDate",
-        "DocDueDate",
         "DocumentStatus",
-        "Cancelled",
-        "UpdateDate",
         "StockTransferLines",
     )
     default_schema = th.PropertiesList(
         th.Property("DocEntry", th.IntegerType),
         th.Property("DocNum", th.IntegerType),
         th.Property("DocDate", th.DateTimeType),
-        th.Property("DocDueDate", th.StringType),
         th.Property("DocumentStatus", th.StringType),
-        th.Property("Cancelled", th.StringType),
-        th.Property("UpdateDate", th.DateTimeType),
         th.Property("StockTransferLines", th.ArrayType(_stock_transfer_line)),
     ).to_dict()

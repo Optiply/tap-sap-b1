@@ -400,3 +400,46 @@ def test_inventory_transfer_request_schema_accepts_a_realistic_record():
     }
 
     jsonschema.validate(record, subject.schema)
+
+
+def test_sap_error_detail_reaches_the_message():
+    """A bare "400 Bad Request" hides which field SAP rejected."""
+    subject = stream()
+    rejected = response(
+        400,
+        {
+            "error": {
+                "code": -1004,
+                "message": {"lang": "en-us", "value": "Invalid field name 'DocDueDate'"},
+            }
+        },
+    )
+
+    with pytest.raises(FatalAPIError, match="Invalid field name 'DocDueDate'"):
+        subject.validate_response(rejected)
+
+
+@pytest.mark.parametrize("body", ['"Service Unavailable"', "[1, 2]", "not-json"])
+def test_an_unusual_error_body_does_not_crash_the_handler(body):
+    subject = stream()
+    raw = requests.Response()
+    raw.status_code = 500
+    raw._content = body.encode()
+
+    # retriable, not an AttributeError from parsing the body
+    with pytest.raises(Exception, match="500"):
+        subject.validate_response(raw)
+
+
+def test_inventory_transfer_requests_only_asks_for_proven_fields():
+    """OWTQ is not a marketing document; unknown fields 400 the whole request."""
+    params = stream(InventoryTransferRequestsStream).get_url_params(None, None)
+    requested = set(params["$select"].split(","))
+
+    assert requested == {
+        "DocEntry",
+        "DocNum",
+        "DocDate",
+        "DocumentStatus",
+        "StockTransferLines",
+    }
