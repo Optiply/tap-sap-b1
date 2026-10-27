@@ -293,9 +293,34 @@ class SAPB1Stream(RESTStream):
     def http_headers(self) -> dict[str, str]:
         return {"Accept": "application/json", "Prefer": f"odata.maxpagesize={self.page_size}"}
 
+    def response_error_message(self, response: requests.Response) -> str:
+        """Add SAP's own error to the SDK's message.
+
+        A bare "400 Client Error: Bad Request" says nothing; SAP's body names
+        the offending field, for example "Invalid field name 'DocDueDate'".
+        """
+        message = super().response_error_message(response)
+        try:
+            payload = response.json()
+        except ValueError:
+            return message
+        if not isinstance(payload, dict):
+            return message
+        error = payload.get("error")
+        if not isinstance(error, dict):
+            return message
+        detail = error.get("message")
+        if isinstance(detail, dict):
+            detail = detail.get("value")
+        if not detail:
+            return message
+        return f"{message} - SAP B1 error {error.get('code')}: {detail}"
+
     def validate_response(self, response: requests.Response) -> None:
         if response.status_code in (401, 403):
             raise InvalidCredentialsError("SAP Business One session is unauthorized")
+        if 400 <= response.status_code < 500:
+            raise FatalAPIError(self.response_error_message(response))
         if response.status_code == 429 or 500 <= response.status_code < 600:
             raise RetriableAPIError(self.response_error_message(response), response)
         super().validate_response(response)
