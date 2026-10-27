@@ -1,11 +1,16 @@
 """SAP Business One tap."""
 
+from datetime import datetime, timezone
+
 from hotglue_etl_exceptions import InvalidCredentialsError
 from hotglue_singer_sdk import Stream, Tap
 from hotglue_singer_sdk import typing as th
+from hotglue_singer_sdk.exceptions import FatalAPIError
 from hotglue_singer_sdk.helpers.capabilities import AlertingLevel
 
+from tap_sap_b1.client import shift_back
 from tap_sap_b1.streams import (
+    InventoryTransferRequestsStream,
     ProductsStream,
     PurchaseDeliveryNotesStream,
     PurchaseOrdersStream,
@@ -21,6 +26,7 @@ STREAM_TYPES = (
     ReservePurchaseInvoicesStream,
     PurchaseDeliveryNotesStream,
     SalesOrdersStream,
+    InventoryTransferRequestsStream,
 )
 
 
@@ -90,6 +96,32 @@ class TapSAPB1(Tap):
         """Prevent all SAP login fields from being written to logs."""
         return config_key in {"company_db", "username", "password"}
 
+    def _validate_stream_settings(self) -> None:
+        """Fail fast on per-stream settings that name a stream that is not there.
+
+        These settings are keyed by stream name, so a typo is otherwise silent:
+        the setting is simply never applied, and the stream keeps its default.
+        """
+        known = {stream_type.name for stream_type in STREAM_TYPES}
+        for setting in ("page_sizes", "lookback_windows", "replication_keys"):
+            configured = self.config.get(setting)
+            if configured is None:
+                continue
+            if not isinstance(configured, dict):
+                raise FatalAPIError(f"{setting} must be an object keyed by stream name")
+            unknown = sorted(set(configured) - known)
+            if unknown:
+                raise FatalAPIError(
+                    f"{setting} refers to unknown streams: {', '.join(unknown)}. "
+                    f"Known streams: {', '.join(sorted(known))}"
+                )
+        windows = self.config.get("lookback_windows") or {}
+        for window in windows.values():
+            if window:
+                # Raises with the offending value rather than failing mid-sync.
+                shift_back(datetime.now(timezone.utc), window)
+
     def discover_streams(self) -> list[Stream]:
         """Return the SAP streams represented by the Alumio integration."""
+        self._validate_stream_settings()
         return [stream_type(tap=self) for stream_type in STREAM_TYPES]

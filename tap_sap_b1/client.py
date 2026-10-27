@@ -12,6 +12,7 @@ from email.utils import parsedate_to_datetime
 from typing import Any
 from urllib.parse import parse_qsl, urlsplit
 
+import backoff
 import requests
 from hotglue_etl_exceptions import InvalidCredentialsError
 from hotglue_singer_sdk import RESTStream
@@ -67,6 +68,23 @@ def page_offset(value: Any | None) -> int:
     if offset < 0:
         raise FatalAPIError(f"Invalid SAP Business One pagination token: {value!r}")
     return offset
+
+
+def strip_odata_annotations(value: Any) -> Any:
+    """Recursively drop OData annotations such as ``odata.etag``.
+
+    They are protocol metadata, not data: the SDK would log a warning and drop
+    them on every record, and a consumer never wants them.
+    """
+    if isinstance(value, dict):
+        return {
+            key: strip_odata_annotations(item)
+            for key, item in value.items()
+            if not key.startswith(("odata.", "@odata."))
+        }
+    if isinstance(value, list):
+        return [strip_odata_annotations(item) for item in value]
+    return value
 
 
 def response_records(response: requests.Response) -> list[dict]:
@@ -339,22 +357,45 @@ class SAPB1Stream(RESTStream):
     def parse_response(self, response: requests.Response) -> Iterable[dict]:
         yield from response_records(response)
 
-    def _request(
-        self, prepared_request: requests.PreparedRequest, context: dict | None
-    ) -> requests.Response:
-        response = self.requests_session.send(
-            prepared_request,
-            timeout=self.timeout,
-            verify=self.verify,
-        )
-        if response.status_code == 401:
-            self._sap_authenticator = None
-            prepared_request.headers.update(self.authenticator.auth_headers)
-            response = self.requests_session.send(
+    def post_process(self, row: dict, context: dict | None = None) -> dict | None:
+        """Drop the OData annotations SAP adds to every record and nested object."""
+        return strip_odata_annotations(row)
+
+    def backoff_wait_generator(self) -> Any:
+        """Wait longer between retries than the SDK default.
+
+        A request that timed out is still running inside SAP, so retrying it a
+        second later stacks another copy of the same expensive query on a
+        server that is already struggling. 5s, 10s, 20s gives it room.
+        """
+        return backoff.expo(factor=5)
+
+    def backoff_max_tries(self) -> int:
+        return 4
+
+    def _send(self, prepared_request: requests.PreparedRequest) -> requests.Response:
+        """Send one request, turning a timeout into an actionable error."""
+        try:
+            return self.requests_session.send(
                 prepared_request,
                 timeout=self.timeout,
                 verify=self.verify,
             )
+        except requests.Timeout as exc:
+            raise RetriableAPIError(
+                f"SAP Business One did not respond within {self.timeout}s for "
+                f"{self.path} at page size {self.page_size}. Lower "
+                f'page_sizes["{self.name}"] or raise request_timeout.'
+            ) from exc
+
+    def _request(
+        self, prepared_request: requests.PreparedRequest, context: dict | None
+    ) -> requests.Response:
+        response = self._send(prepared_request)
+        if response.status_code == 401:
+            self._sap_authenticator = None
+            prepared_request.headers.update(self.authenticator.auth_headers)
+            response = self._send(prepared_request)
         self._write_request_duration_log(
             endpoint=self.path,
             response=response,

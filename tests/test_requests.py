@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 
+import jsonschema
 import pytest
 import requests
 from hotglue_singer_sdk.exceptions import FatalAPIError
@@ -11,6 +12,7 @@ from requests.cookies import RequestsCookieJar
 
 from tap_sap_b1.client import SAPSessionAuthenticator
 from tap_sap_b1.streams import (
+    InventoryTransferRequestsStream,
     ProductsStream,
     PurchaseDeliveryNotesStream,
     PurchaseOrdersStream,
@@ -264,3 +266,137 @@ def test_bookmark_and_lookback_drive_the_filter(tmp_path):
         # sync() seeds the starting replication value before the first request
         subject._write_starting_replication_value(None)
         assert subject.get_url_params(None, None)["$filter"].endswith(expected)
+
+
+# ---------------------------------------------------------- resilience
+
+
+def test_odata_annotations_are_stripped_from_records():
+    """SAP tags every record; the SDK would warn and drop them on each one."""
+    subject = stream()
+    row = {
+        "odata.etag": 'W/"1"',
+        "@odata.etag": 'W/"1"',
+        "ItemCode": "9136",
+        "ItemPrices": [{"odata.type": "#Price", "PriceList": 1, "Price": 10}],
+        "ItemWarehouseInfoCollection": [{"@odata.id": "x", "InStock": 5}],
+    }
+
+    assert subject.post_process(row, None) == {
+        "ItemCode": "9136",
+        "ItemPrices": [{"PriceList": 1, "Price": 10}],
+        "ItemWarehouseInfoCollection": [{"InStock": 5}],
+    }
+
+
+def test_a_timeout_becomes_an_actionable_retriable_error(monkeypatch):
+    """A timed-out query keeps running in SAP; the message says which knob to turn."""
+    from hotglue_singer_sdk.exceptions import RetriableAPIError
+
+    subject = stream(request_timeout=30, page_sizes={"products": 2500})
+
+    class TimingOutSession:
+        def send(self, *args, **kwargs):
+            raise requests.Timeout("read timed out")
+
+    monkeypatch.setattr(
+        type(subject), "requests_session", property(lambda self: TimingOutSession())
+    )
+    request = requests.Request("GET", "https://sap.example.test:50000/b1s/v1/Items")
+
+    with pytest.raises(RetriableAPIError) as excinfo:
+        subject._request(request.prepare(), None)
+
+    message = str(excinfo.value)
+    assert "30s" in message and "2500" in message
+    assert 'page_sizes["products"]' in message and "request_timeout" in message
+
+
+def test_retries_wait_long_enough_for_sap_to_recover():
+    """The SDK default retries a heavy query within a second of it timing out."""
+    subject = stream()
+    waits = [next(subject.backoff_wait_generator()) for _ in range(3)]
+
+    assert min(waits) >= 5
+    assert subject.backoff_max_tries() == 4
+
+
+# ------------------------------------------------------ config validation
+
+
+@pytest.mark.parametrize(
+    "setting", ["page_sizes", "lookback_windows", "replication_keys"]
+)
+def test_a_typo_in_a_per_stream_setting_is_rejected(setting):
+    """These are keyed by stream name, so a typo would otherwise do nothing."""
+    tap = TapSAPB1(
+        config=CONFIG | {setting: {"product": 100}}, validate_config=False
+    )
+
+    with pytest.raises(FatalAPIError, match="unknown streams: product"):
+        tap.discover_streams()
+
+
+def test_an_invalid_lookback_window_is_rejected_at_discovery():
+    tap = TapSAPB1(
+        config=CONFIG | {"lookback_windows": {"products": "ages"}},
+        validate_config=False,
+    )
+
+    with pytest.raises(FatalAPIError, match="lookback"):
+        tap.discover_streams()
+
+
+def test_valid_per_stream_settings_pass_validation():
+    tap = TapSAPB1(
+        config=CONFIG
+        | {
+            "page_sizes": {"products": 200},
+            "lookback_windows": {"sales_orders": "1mo"},
+            "replication_keys": {"products": "U_last_changed"},
+        },
+        validate_config=False,
+    )
+
+    assert len(tap.discover_streams()) == len(STREAM_TYPES)
+
+
+# ------------------------------------------- inventory transfer requests
+
+
+def test_inventory_transfer_requests_reads_open_requests_with_their_lines():
+    """Alumio queried these per SKU; one paged pass covers every SKU."""
+    subject = stream(InventoryTransferRequestsStream)
+    params = subject.get_url_params(None, None)
+
+    assert subject.path == "/InventoryTransferRequests"
+    assert params["$filter"] == "DocumentStatus eq 'bost_Open'"
+    assert "StockTransferLines" in params["$select"]
+    assert params["$orderby"] == "DocEntry"
+    # a snapshot of what is open, like purchase_orders
+    assert subject.replication_key is None
+
+
+def test_inventory_transfer_request_schema_accepts_a_realistic_record():
+    subject = stream(InventoryTransferRequestsStream)
+    record = {
+        "DocEntry": 412,
+        "DocNum": 1412,
+        "DocDate": "2026-10-20T00:00:00Z",
+        "DocDueDate": "2026-10-27",
+        "DocumentStatus": "bost_Open",
+        "Cancelled": "tNO",
+        "UpdateDate": "2026-10-26T00:00:00Z",
+        "StockTransferLines": [
+            {
+                "LineNum": 0,
+                "ItemCode": "9136",
+                "ItemDescription": "Doos 300x200x150",
+                "Quantity": 25.0,
+                "WarehouseCode": "01",
+                "FromWarehouseCode": "02",
+            }
+        ],
+    }
+
+    jsonschema.validate(record, subject.schema)

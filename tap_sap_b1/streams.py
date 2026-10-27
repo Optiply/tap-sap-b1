@@ -38,6 +38,15 @@ _document_line = th.ObjectType(
     th.Property("ShipDate", th.StringType),
 )
 
+_stock_transfer_line = th.ObjectType(
+    th.Property("LineNum", th.IntegerType),
+    th.Property("ItemCode", th.StringType),
+    th.Property("ItemDescription", th.StringType),
+    th.Property("Quantity", th.NumberType),
+    th.Property("WarehouseCode", th.StringType),
+    th.Property("FromWarehouseCode", th.StringType),
+)
+
 _document_schema = th.PropertiesList(
     th.Property("DocEntry", th.IntegerType),
     th.Property("DocNum", th.IntegerType),
@@ -250,3 +259,43 @@ class SalesOrdersStream(SAPB1Stream):
     fixed_filter = "DocumentStatus eq 'bost_Close'"
     select_fields = _DOCUMENT_FIELDS
     default_schema = _document_schema
+
+
+class InventoryTransferRequestsStream(SAPB1Stream):
+    """Open inventory transfer requests and their lines.
+
+    Stock that has been requested for transfer between warehouses but not yet
+    moved. The Alumio integration added these quantities to a product's stock
+    level, querying them one SKU at a time through QueryService_PostQuery
+    because a GET cannot filter on a line-level field. The tap has no such
+    constraint: it reads every open request once and the consumer sums
+    StockTransferLines per ItemCode.
+
+    Open-only, so like purchase_orders this is a snapshot: a request that
+    disappears has been transferred or cancelled.
+    """
+
+    name = "inventory_transfer_requests"
+    path = "/InventoryTransferRequests"
+    fixed_filter = "DocumentStatus eq 'bost_Open'"
+    default_primary_keys = ("DocEntry",)
+    select_fields = (
+        "DocEntry",
+        "DocNum",
+        "DocDate",
+        "DocDueDate",
+        "DocumentStatus",
+        "Cancelled",
+        "UpdateDate",
+        "StockTransferLines",
+    )
+    default_schema = th.PropertiesList(
+        th.Property("DocEntry", th.IntegerType),
+        th.Property("DocNum", th.IntegerType),
+        th.Property("DocDate", th.DateTimeType),
+        th.Property("DocDueDate", th.StringType),
+        th.Property("DocumentStatus", th.StringType),
+        th.Property("Cancelled", th.StringType),
+        th.Property("UpdateDate", th.DateTimeType),
+        th.Property("StockTransferLines", th.ArrayType(_stock_transfer_line)),
+    ).to_dict()

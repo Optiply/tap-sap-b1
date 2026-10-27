@@ -12,10 +12,13 @@ Read-only Singer tap for SAP Business One Service Layer, built with `hotglue_sin
 | `reserve_purchase_invoices` | `/PurchaseInvoices` | `DocEntry` | full table, open reserve invoices only |
 | `purchase_delivery_notes` | `/PurchaseDeliveryNotes` | `DocEntry` | `UpdateDate` (+7d overlap), completed only |
 | `sales_orders` | `/Orders` | `DocEntry` | `UpdateDate` (+7d overlap), completed only |
+| `inventory_transfer_requests` | `/InventoryTransferRequests` | `DocEntry` | full table, open only |
 
 Closed documents replicate on `UpdateDate`, which SAP moves when a document is closed or cancelled - `DocDate` does not, which is why these streams used to read the full closed history on every run. Each run also re-reads a lookback window before the bookmark as a safety margin.
 
 Cancelled documents are **not** filtered out: cancelling closes a document, so they arrive through the `bost_Close` filter carrying `Cancelled: 'tYES'`, and the consumer decides whether to retract them.
+
+`inventory_transfer_requests` carries `StockTransferLines`: stock requested for transfer between warehouses but not yet moved. The Alumio integration added these quantities to a product's stock level, querying them one SKU at a time through `QueryService_PostQuery` because a GET cannot filter on a line-level field. This stream reads every open request once instead, and the consumer sums the lines per `ItemCode`.
 
 `products` includes `ItemPreferredVendors` and `ItemWarehouseInfoCollection`, covering supplier-product links and stock by warehouse. Document streams retain `DocumentLines` so lines stay joined to their parent and product identifiers.
 
@@ -67,6 +70,9 @@ For a bounded sync, select one stream in the catalog and use a recent `start_dat
 ## Behavior
 
 - Logs in through `POST /Login`; credentials are marked secret and never logged.
+- Strips OData annotations (`odata.etag` and friends) from records and nested objects.
+- Rejects per-stream settings naming an unknown stream, and unparseable lookback windows, at discovery rather than mid-sync.
+- Waits 5s, 10s, 20s between retries: a timed-out query is still running inside SAP, so retrying immediately stacks copies of it. A timeout names the page size and timeout in the error.
 - Sends the returned `B1SESSION` and optional `ROUTEID` cookies; refreshes once after a data-request 401.
 - Prefers `@odata.nextLink`/`odata.nextLink`, then falls back to stable `$orderby`, `$top`, and `$skip` pagination.
 - Retries login only for connection failures, HTTP 429, and HTTP 5xx, with finite waits.
