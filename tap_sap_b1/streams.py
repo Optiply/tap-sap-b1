@@ -48,6 +48,8 @@ _document_schema = th.PropertiesList(
     th.Property("VatSum", th.NumberType),
     th.Property("CardCode", th.StringType),
     th.Property("DocumentStatus", th.StringType),
+    th.Property("Cancelled", th.StringType),
+    th.Property("UpdateDate", th.DateTimeType),
     th.Property("U_OPT_PO_HeaderID", th.StringType),
     th.Property("DocumentLines", th.ArrayType(_document_line)),
 ).to_dict()
@@ -61,6 +63,11 @@ _DOCUMENT_FIELDS = (
     "DocTotal",
     "VatSum",
     "DocumentStatus",
+    # Cancelling a document closes it, so cancelled documents arrive through
+    # the bost_Close filter. Without this flag the consumer cannot tell them
+    # apart from genuinely completed ones.
+    "Cancelled",
+    "UpdateDate",
     "DocumentLines",
     "CardCode",
     "U_OPT_PO_HeaderID",
@@ -72,7 +79,11 @@ class ProductsStream(SAPB1Stream):
 
     name = "products"
     path = "/Items"
-    default_replication_key = "U_last_changed"
+    #: SAP's own last-modified date, not a UDF: it exists on every item and is
+    #: maintained by SAP itself. U_last_changed is still selected, so a shop
+    #: that prefers it can switch with replication_keys config.
+    default_replication_key = "UpdateDate"
+    default_lookback = "1d"
     default_primary_keys = ("ItemCode",)
     #: Items carry three child collections, so pages are expensive to build.
     default_page_size = 500
@@ -104,6 +115,8 @@ class ProductsStream(SAPB1Stream):
         "Mainsupplier",
         "PurchaseUnitVolume",
         "U_last_changed",
+        "UpdateDate",
+        "UpdateTime",
     )
 
     @property
@@ -140,6 +153,8 @@ class ProductsStream(SAPB1Stream):
         th.Property("Mainsupplier", th.StringType),
         th.Property("PurchaseUnitVolume", th.NumberType),
         th.Property("U_last_changed", th.DateTimeType),
+        th.Property("UpdateDate", th.DateTimeType),
+        th.Property("UpdateTime", th.StringType),
     ).to_dict()
 
 
@@ -149,6 +164,7 @@ class SuppliersStream(SAPB1Stream):
     name = "suppliers"
     path = "/BusinessPartners"
     default_replication_key = "UpdateDate"
+    default_lookback = "1d"
     default_primary_keys = ("CardCode",)
     default_page_size = 500
     fixed_filter = "CardType eq 'cSupplier'"
@@ -201,9 +217,20 @@ class PurchaseDeliveryNotesStream(SAPB1Stream):
 
     name = "purchase_delivery_notes"
     path = "/PurchaseDeliveryNotes"
+    #: UpdateDate moves when a document is closed or cancelled, which DocDate
+    #: does not. A full scan of every closed note is otherwise unbounded.
+    default_replication_key = "UpdateDate"
+    default_lookback = "7d"
     default_primary_keys = ("DocEntry",)
     fixed_filter = "DocumentStatus eq 'bost_Close'"
-    select_fields = ("DocEntry", "DocDate", "DocumentStatus", "DocumentLines")
+    select_fields = (
+        "DocEntry",
+        "DocDate",
+        "DocumentStatus",
+        "Cancelled",
+        "UpdateDate",
+        "DocumentLines",
+    )
     default_schema = _document_schema
 
 
@@ -212,6 +239,11 @@ class SalesOrdersStream(SAPB1Stream):
 
     name = "sales_orders"
     path = "/Orders"
+    #: See PurchaseDeliveryNotesStream: UpdateDate tracks closure, DocDate does
+    #: not. Cancelled orders arrive too, flagged, so a consumer can retract
+    #: them downstream.
+    default_replication_key = "UpdateDate"
+    default_lookback = "7d"
     default_primary_keys = ("DocEntry",)
     #: Orders carry DocumentLines, so keep pages modest.
     default_page_size = 500

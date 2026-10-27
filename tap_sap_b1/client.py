@@ -2,8 +2,12 @@
 
 from __future__ import annotations
 
+import re
 import time
+from calendar import monthrange
 from collections.abc import Iterable
+from copy import deepcopy
+from datetime import datetime, timedelta
 from email.utils import parsedate_to_datetime
 from typing import Any
 from urllib.parse import parse_qsl, urlsplit
@@ -16,6 +20,39 @@ from hotglue_singer_sdk.exceptions import FatalAPIError, RetriableAPIError
 
 #: Records per request when nothing is configured.
 DEFAULT_PAGE_SIZE = 500
+#: Lookback windows are written as "7d", "1w", "5mo", "45m", "1 year".
+_WINDOW_PATTERN = re.compile(r"^\s*-?\s*(\d+)\s*([a-zA-Z]+)\s*$")
+_WINDOW_UNITS = {
+    "m": "minutes", "min": "minutes", "mins": "minutes", "minute": "minutes",
+    "minutes": "minutes",
+    "h": "hours", "hr": "hours", "hrs": "hours", "hour": "hours", "hours": "hours",
+    "d": "days", "day": "days", "days": "days",
+    "w": "weeks", "week": "weeks", "weeks": "weeks",
+    "mo": "months", "mon": "months", "month": "months", "months": "months",
+    "y": "years", "year": "years", "years": "years",
+}
+
+
+def shift_back(value: datetime, window: str) -> datetime:
+    """Return ``value`` moved back by a window such as ``7d`` or ``5mo``.
+
+    Raises:
+        FatalAPIError: when the window cannot be parsed.
+    """
+    match = _WINDOW_PATTERN.match(str(window))
+    unit = _WINDOW_UNITS.get(match.group(2).lower()) if match else None
+    if not unit:
+        raise FatalAPIError(f"Invalid lookback window: {window!r}")
+    amount = int(match.group(1))
+    if unit in ("months", "years"):
+        months = amount * (12 if unit == "years" else 1)
+        index = (value.year * 12 + value.month - 1) - months
+        year, month = divmod(index, 12)
+        month += 1
+        return value.replace(
+            year=year, month=month, day=min(value.day, monthrange(year, month)[1])
+        )
+    return value - timedelta(**{unit: amount})
 #: Seconds before a Service Layer request is abandoned.
 DEFAULT_REQUEST_TIMEOUT = 300
 #: Appended to api_url when it carries no Service Layer path.
@@ -132,17 +169,38 @@ class SAPB1Stream(RESTStream):
     default_replication_key: str | None = None
     default_schema: dict[str, Any] = {}
     default_page_size = DEFAULT_PAGE_SIZE
+    #: Overlap re-scanned on every run, on top of the bookmark.
+    default_lookback: str | None = None
     select_fields: tuple[str, ...] = ()
     fixed_filter: str | None = None
     default_primary_keys: tuple[str, ...] = ()
     _sap_authenticator: SAPSessionAuthenticator | None = None
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
-        kwargs.setdefault("schema", self.default_schema)
+        # The replication key is configurable per stream: a shop can point a
+        # stream at a different "last changed" field, or set it to null to fall
+        # back to a full-table sync. It is resolved before super().__init__ so
+        # the schema can carry it - the SDK can only bookmark a field the
+        # schema declares, and SAP only returns one that is selected.
+        tap = kwargs.get("tap") or (args[0] if args else None)
+        config = getattr(tap, "config", None) or {}
+        key = self.default_replication_key
+        configured = config.get("replication_keys")
+        if isinstance(configured, dict) and self.name in configured:
+            key = configured[self.name]
+
+        schema = kwargs.get("schema") or self.default_schema
+        if key and key not in (schema.get("properties") or {}):
+            # Copy first: default_schema is a class attribute shared by every
+            # instance of this stream.
+            schema = deepcopy(schema)
+            schema["properties"][key] = {"type": ["string", "null"]}
+        kwargs["schema"] = schema
+
         super().__init__(*args, **kwargs)
         self.primary_keys = list(self.default_primary_keys)
-        if self.default_replication_key is not None:
-            self.replication_key = self.default_replication_key
+        if key:
+            self.replication_key = key
 
     @property
     def url_base(self) -> str:
@@ -189,6 +247,19 @@ class SAPB1Stream(RESTStream):
         return page_size
 
     @property
+    def lookback(self) -> str | None:
+        """Overlap re-scanned every run, on top of the bookmark.
+
+        SAP's UpdateDate has day granularity and a document can, in rare cases,
+        change status without the field moving, so a stream re-reads a window
+        before its bookmark instead of trusting it exactly.
+        """
+        configured = self.config.get("lookback_windows")
+        if isinstance(configured, dict) and self.name in configured:
+            return configured[self.name]
+        return self.default_lookback
+
+    @property
     def verify(self) -> bool | str:
         return self.config.get("ca_bundle") or self.config.get("verify_ssl", True)
 
@@ -218,6 +289,8 @@ class SAPB1Stream(RESTStream):
         if self.replication_key:
             starting_time = self.get_starting_time(context)
             if starting_time:
+                if self.lookback:
+                    starting_time = shift_back(starting_time, self.lookback)
                 date = starting_time.strftime("%Y-%m-%d")
                 filters.append(f"{self.replication_key} ge '{date}'")
 
@@ -231,7 +304,10 @@ class SAPB1Stream(RESTStream):
         if orderby := ",".join(self.primary_keys or ()):
             params["$orderby"] = orderby
         if self.select_fields:
-            params["$select"] = ",".join(self.select_fields)
+            fields = list(self.select_fields)
+            if self.replication_key and self.replication_key not in fields:
+                fields.append(self.replication_key)
+            params["$select"] = ",".join(fields)
         if filters:
             params["$filter"] = " and ".join(filters)
         if isinstance(next_page_token, dict):

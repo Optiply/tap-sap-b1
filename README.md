@@ -6,12 +6,16 @@ Read-only Singer tap for SAP Business One Service Layer, built with `hotglue_sin
 
 | Stream | Service Layer endpoint | Primary key | Replication |
 | --- | --- | --- | --- |
-| `products` | `/Items` | `ItemCode` | `U_last_changed` |
-| `suppliers` | `/BusinessPartners` | `CardCode` | `UpdateDate` |
+| `products` | `/Items` | `ItemCode` | `UpdateDate` (+1d overlap) |
+| `suppliers` | `/BusinessPartners` | `CardCode` | `UpdateDate` (+1d overlap) |
 | `purchase_orders` | `/PurchaseOrders` | `DocEntry` | full table, open only |
 | `reserve_purchase_invoices` | `/PurchaseInvoices` | `DocEntry` | full table, open reserve invoices only |
-| `purchase_delivery_notes` | `/PurchaseDeliveryNotes` | `DocEntry` | full table, completed only |
-| `sales_orders` | `/Orders` | `DocEntry` | full table, completed only |
+| `purchase_delivery_notes` | `/PurchaseDeliveryNotes` | `DocEntry` | `UpdateDate` (+7d overlap), completed only |
+| `sales_orders` | `/Orders` | `DocEntry` | `UpdateDate` (+7d overlap), completed only |
+
+Closed documents replicate on `UpdateDate`, which SAP moves when a document is closed or cancelled - `DocDate` does not, which is why these streams used to read the full closed history on every run. Each run also re-reads a lookback window before the bookmark as a safety margin.
+
+Cancelled documents are **not** filtered out: cancelling closes a document, so they arrive through the `bost_Close` filter carrying `Cancelled: 'tYES'`, and the consumer decides whether to retract them.
 
 `products` includes `ItemPreferredVendors` and `ItemWarehouseInfoCollection`, covering supplier-product links and stock by warehouse. Document streams retain `DocumentLines` so lines stay joined to their parent and product identifiers.
 
@@ -25,11 +29,29 @@ Read-only Singer tap for SAP Business One Service Layer, built with `hotglue_sin
   "password": "PASSWORD",
   "start_date": "2024-01-01T00:00:00Z",
   "verify_ssl": true,
-  "request_timeout": 30
+  "request_timeout": 300,
+  "page_size": 500,
+  "page_sizes": { "products": 200 },
+  "include_warehouse_stock": true
 }
 ```
 
 `api_url`, `company_db`, `username`, and `password` are required. Keep real config under `.secrets/` (gitignored). Set `ca_bundle` for a private CA. Use `verify_ssl: false` only for an explicitly approved development system.
+
+`api_url` should be the Service Layer root, including the version segment (`/b1s/v1` or `/b1s/v2`). A bare host is accepted and `/b1s/v1` is assumed, with a warning — pin the version yourself when the server offers both.
+
+### Tuning throughput
+
+| Setting | Default | What it does |
+| --- | --- | --- |
+| `request_timeout` | `300` | Seconds before a request is abandoned. SAP can take minutes to build a large page, and a timed-out request keeps running server side while the tap retries it. |
+| `page_size` | `500` | Records per request for every stream (sent as `$top` and `Prefer: odata.maxpagesize`). |
+| `page_sizes` | – | Per-stream override, e.g. `{"products": 200}`. |
+| `include_warehouse_stock` | `true` | Request `ItemWarehouseInfoCollection` on `products`. Switch it off when only totals are needed. |
+| `replication_keys` | – | Per-stream replication key, e.g. `{"products": "U_last_changed"}`. Set a stream to `null` for a full-table sync. |
+| `lookback_windows` | see above | Per-stream overlap re-read every run, e.g. `{"sales_orders": "1mo"}`. Units: `m`, `h`, `d`, `w`, `mo`, `y`. |
+
+Items carry three child collections (`ItemPrices`, `ItemPreferredVendors`, `ItemWarehouseInfoCollection`), and SAP serializes a page in one go: cost grows with the page size, not with the total number of records. If `products` times out, lower `page_sizes.products` before raising `request_timeout`, and switch `include_warehouse_stock` off if the warehouse data is not used downstream.
 
 ## Run
 

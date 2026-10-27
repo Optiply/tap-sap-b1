@@ -67,6 +67,22 @@ class TapSAPB1(Tap):
         th.Property("page_size", th.IntegerType),
         th.Property("page_sizes", th.ObjectType()),
         th.Property("include_warehouse_stock", th.BooleanType, default=True),
+        th.Property(
+            "replication_keys",
+            th.ObjectType(),
+            description=(
+                'Per-stream replication key, e.g. {"products": "U_last_changed"}. '
+                "Set a stream to null for a full-table sync."
+            ),
+        ),
+        th.Property(
+            "lookback_windows",
+            th.ObjectType(),
+            description=(
+                'Per-stream overlap re-scanned every run, e.g. {"sales_orders": '
+                '"1mo"}. Accepts m, h, d, w, mo, y.'
+            ),
+        ),
     ).to_dict()
 
     @staticmethod
