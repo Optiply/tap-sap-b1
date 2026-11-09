@@ -8,13 +8,15 @@ Read-only Singer tap for SAP Business One Service Layer, built with `hotglue_sin
 | --- | --- | --- | --- |
 | `products` | `/Items` | `ItemCode` | `UpdateDate` (+1d overlap) |
 | `suppliers` | `/BusinessPartners` | `CardCode` | `UpdateDate` (+1d overlap) |
-| `purchase_orders` | `/PurchaseOrders` | `DocEntry` | full table, open only |
+| `purchase_orders` | `/PurchaseOrders` | `DocEntry` | `UpdateDate` (+7d overlap), any status |
 | `reserve_purchase_invoices` | `/PurchaseInvoices` | `DocEntry` | full table, open reserve invoices only |
 | `purchase_delivery_notes` | `/PurchaseDeliveryNotes` | `DocEntry` | `UpdateDate` (+7d overlap), completed only |
 | `sales_orders` | `/Orders` | `DocEntry` | `UpdateDate` (+7d overlap), completed only |
 | `inventory_transfer_requests` | `/InventoryTransferRequests` | `DocEntry` | full table, open only |
 
 Closed documents replicate on `UpdateDate`, which SAP moves when a document is closed or cancelled - `DocDate` does not, which is why these streams used to read the full closed history on every run. Each run also re-reads a lookback window before the bookmark as a safety margin.
+
+`purchase_orders` carries no status filter: an order is delivered again whenever it changes, with `DocumentStatus` and `Cancelled` attached, so being received or cancelled is an event the consumer sees rather than a row that quietly stops appearing. `reserve_purchase_invoices` and `inventory_transfer_requests` remain open-only snapshots, where absence is the signal.
 
 Cancelled documents are **not** filtered out: cancelling closes a document, so they arrive through the `bost_Close` filter carrying `Cancelled: 'tYES'`, and the consumer decides whether to retract them.
 
