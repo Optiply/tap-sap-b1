@@ -38,6 +38,15 @@ _document_line = th.ObjectType(
     th.Property("ShipDate", th.StringType),
 )
 
+_stock_transfer_line = th.ObjectType(
+    th.Property("LineNum", th.IntegerType),
+    th.Property("ItemCode", th.StringType),
+    th.Property("ItemDescription", th.StringType),
+    th.Property("Quantity", th.NumberType),
+    th.Property("WarehouseCode", th.StringType),
+    th.Property("FromWarehouseCode", th.StringType),
+)
+
 _document_schema = th.PropertiesList(
     th.Property("DocEntry", th.IntegerType),
     th.Property("DocNum", th.IntegerType),
@@ -48,6 +57,8 @@ _document_schema = th.PropertiesList(
     th.Property("VatSum", th.NumberType),
     th.Property("CardCode", th.StringType),
     th.Property("DocumentStatus", th.StringType),
+    th.Property("Cancelled", th.StringType),
+    th.Property("UpdateDate", th.DateTimeType),
     th.Property("U_OPT_PO_HeaderID", th.StringType),
     th.Property("DocumentLines", th.ArrayType(_document_line)),
 ).to_dict()
@@ -61,6 +72,11 @@ _DOCUMENT_FIELDS = (
     "DocTotal",
     "VatSum",
     "DocumentStatus",
+    # Cancelling a document closes it, so cancelled documents arrive through
+    # the bost_Close filter. Without this flag the consumer cannot tell them
+    # apart from genuinely completed ones.
+    "Cancelled",
+    "UpdateDate",
     "DocumentLines",
     "CardCode",
     "U_OPT_PO_HeaderID",
@@ -72,7 +88,11 @@ class ProductsStream(SAPB1Stream):
 
     name = "products"
     path = "/Items"
-    default_replication_key = "U_last_changed"
+    #: SAP's own last-modified date, not a UDF: it exists on every item and is
+    #: maintained by SAP itself. U_last_changed is still selected, so a shop
+    #: that prefers it can switch with replication_keys config.
+    default_replication_key = "UpdateDate"
+    default_lookback = "1d"
     default_primary_keys = ("ItemCode",)
     #: Items carry three child collections, so pages are expensive to build.
     default_page_size = 500
@@ -104,6 +124,8 @@ class ProductsStream(SAPB1Stream):
         "Mainsupplier",
         "PurchaseUnitVolume",
         "U_last_changed",
+        "UpdateDate",
+        "UpdateTime",
     )
 
     @property
@@ -140,6 +162,8 @@ class ProductsStream(SAPB1Stream):
         th.Property("Mainsupplier", th.StringType),
         th.Property("PurchaseUnitVolume", th.NumberType),
         th.Property("U_last_changed", th.DateTimeType),
+        th.Property("UpdateDate", th.DateTimeType),
+        th.Property("UpdateTime", th.StringType),
     ).to_dict()
 
 
@@ -149,6 +173,7 @@ class SuppliersStream(SAPB1Stream):
     name = "suppliers"
     path = "/BusinessPartners"
     default_replication_key = "UpdateDate"
+    default_lookback = "1d"
     default_primary_keys = ("CardCode",)
     default_page_size = 500
     fixed_filter = "CardType eq 'cSupplier'"
@@ -175,11 +200,19 @@ class SuppliersStream(SAPB1Stream):
 
 
 class PurchaseOrdersStream(SAPB1Stream):
-    """Open purchase orders."""
+    """Purchase orders, whatever their status.
+
+    Reading only open orders made this a snapshot: an order that was received
+    or cancelled simply stopped appearing, so a consumer could see that it had
+    gone but never why. Replicating on UpdateDate delivers the order again
+    whenever it changes, carrying DocumentStatus and Cancelled, so a closure
+    becomes an event rather than an absence.
+    """
 
     name = "purchase_orders"
     path = "/PurchaseOrders"
-    fixed_filter = "DocumentStatus eq 'bost_Open'"
+    default_replication_key = "UpdateDate"
+    default_lookback = "7d"
     default_primary_keys = ("DocEntry",)
     select_fields = _DOCUMENT_FIELDS
     default_schema = _document_schema
@@ -201,9 +234,20 @@ class PurchaseDeliveryNotesStream(SAPB1Stream):
 
     name = "purchase_delivery_notes"
     path = "/PurchaseDeliveryNotes"
+    #: UpdateDate moves when a document is closed or cancelled, which DocDate
+    #: does not. A full scan of every closed note is otherwise unbounded.
+    default_replication_key = "UpdateDate"
+    default_lookback = "7d"
     default_primary_keys = ("DocEntry",)
     fixed_filter = "DocumentStatus eq 'bost_Close'"
-    select_fields = ("DocEntry", "DocDate", "DocumentStatus", "DocumentLines")
+    select_fields = (
+        "DocEntry",
+        "DocDate",
+        "DocumentStatus",
+        "Cancelled",
+        "UpdateDate",
+        "DocumentLines",
+    )
     default_schema = _document_schema
 
 
@@ -212,9 +256,52 @@ class SalesOrdersStream(SAPB1Stream):
 
     name = "sales_orders"
     path = "/Orders"
+    #: See PurchaseDeliveryNotesStream: UpdateDate tracks closure, DocDate does
+    #: not. Cancelled orders arrive too, flagged, so a consumer can retract
+    #: them downstream.
+    default_replication_key = "UpdateDate"
+    default_lookback = "7d"
     default_primary_keys = ("DocEntry",)
     #: Orders carry DocumentLines, so keep pages modest.
     default_page_size = 500
     fixed_filter = "DocumentStatus eq 'bost_Close'"
     select_fields = _DOCUMENT_FIELDS
     default_schema = _document_schema
+
+
+class InventoryTransferRequestsStream(SAPB1Stream):
+    """Open inventory transfer requests and their lines.
+
+    Stock that has been requested for transfer between warehouses but not yet
+    moved. The Alumio integration added these quantities to a product's stock
+    level, querying them one SKU at a time through QueryService_PostQuery
+    because a GET cannot filter on a line-level field. The tap has no such
+    constraint: it reads every open request once and the consumer sums
+    StockTransferLines per ItemCode.
+
+    Open-only, so like purchase_orders this is a snapshot: a request that
+    disappears has been transferred or cancelled.
+    """
+
+    name = "inventory_transfer_requests"
+    path = "/InventoryTransferRequests"
+    fixed_filter = "DocumentStatus eq 'bost_Open'"
+    default_primary_keys = ("DocEntry",)
+    #: InventoryTransferRequest is not a marketing document (it is OWTQ, not
+    #: ODLN/ORDR), so it does not carry the full Document field set. Only
+    #: fields the Alumio integration proved against this system are requested;
+    #: an unknown one makes SAP reject the whole request with a 400.
+    select_fields = (
+        "DocEntry",
+        "DocNum",
+        "DocDate",
+        "DocumentStatus",
+        "StockTransferLines",
+    )
+    default_schema = th.PropertiesList(
+        th.Property("DocEntry", th.IntegerType),
+        th.Property("DocNum", th.IntegerType),
+        th.Property("DocDate", th.DateTimeType),
+        th.Property("DocumentStatus", th.StringType),
+        th.Property("StockTransferLines", th.ArrayType(_stock_transfer_line)),
+    ).to_dict()
