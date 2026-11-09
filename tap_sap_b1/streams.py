@@ -4,6 +4,11 @@ from hotglue_singer_sdk import typing as th
 
 from tap_sap_b1.client import SAPB1Stream
 
+#: SAP returns time fields as "14:05:00" on newer Service Layers and as an
+#: integer (1405) on older ones; accept either rather than failing a sync.
+#: th.Property appends "null" itself, so it is not listed here.
+_TIME = th.CustomType({"type": ["string", "integer"]})
+
 _item_price = th.ObjectType(
     th.Property("PriceList", th.IntegerType),
     th.Property("Price", th.NumberType),
@@ -59,6 +64,7 @@ _document_schema = th.PropertiesList(
     th.Property("DocumentStatus", th.StringType),
     th.Property("Cancelled", th.StringType),
     th.Property("UpdateDate", th.DateTimeType),
+    th.Property("UpdateTime", _TIME),
     th.Property("U_OPT_PO_HeaderID", th.StringType),
     th.Property("DocumentLines", th.ArrayType(_document_line)),
 ).to_dict()
@@ -77,6 +83,7 @@ _DOCUMENT_FIELDS = (
     # apart from genuinely completed ones.
     "Cancelled",
     "UpdateDate",
+    "UpdateTime",
     "DocumentLines",
     "CardCode",
     "U_OPT_PO_HeaderID",
@@ -163,7 +170,7 @@ class ProductsStream(SAPB1Stream):
         th.Property("PurchaseUnitVolume", th.NumberType),
         th.Property("U_last_changed", th.DateTimeType),
         th.Property("UpdateDate", th.DateTimeType),
-        th.Property("UpdateTime", th.StringType),
+        th.Property("UpdateTime", _TIME),
     ).to_dict()
 
 
@@ -192,7 +199,7 @@ class SuppliersStream(SAPB1Stream):
         th.Property("CardCode", th.StringType),
         th.Property("EmailAddress", th.StringType),
         th.Property("UpdateDate", th.DateTimeType),
-        th.Property("UpdateTime", th.StringType),
+        th.Property("UpdateTime", _TIME),
         th.Property("U_OPT_IgnoredSupplier", th.StringType),
         th.Property("U_OPT_FixedCosts", th.NumberType),
         th.Property("U_LBS_MinimaalOrderbedrag", th.NumberType),
@@ -200,11 +207,19 @@ class SuppliersStream(SAPB1Stream):
 
 
 class PurchaseOrdersStream(SAPB1Stream):
-    """Open purchase orders."""
+    """Purchase orders, whatever their status.
+
+    Reading only open orders made this a snapshot: an order that was received
+    or cancelled simply stopped appearing, so a consumer could see that it had
+    gone but never why. Replicating on UpdateDate delivers the order again
+    whenever it changes, carrying DocumentStatus and Cancelled, so a closure
+    becomes an event rather than an absence.
+    """
 
     name = "purchase_orders"
     path = "/PurchaseOrders"
-    fixed_filter = "DocumentStatus eq 'bost_Open'"
+    default_replication_key = "UpdateDate"
+    default_lookback = "7d"
     default_primary_keys = ("DocEntry",)
     select_fields = _DOCUMENT_FIELDS
     default_schema = _document_schema
@@ -238,6 +253,7 @@ class PurchaseDeliveryNotesStream(SAPB1Stream):
         "DocumentStatus",
         "Cancelled",
         "UpdateDate",
+        "UpdateTime",
         "DocumentLines",
     )
     default_schema = _document_schema
