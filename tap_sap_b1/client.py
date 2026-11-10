@@ -56,8 +56,13 @@ def shift_back(value: datetime, window: str) -> datetime:
     return value - timedelta(**{unit: amount})
 #: Seconds before a Service Layer request is abandoned.
 DEFAULT_REQUEST_TIMEOUT = 300
-#: Appended to api_url when it carries no Service Layer path.
-DEFAULT_SERVICE_LAYER_PATH = "/b1s/v1"
+#: The Service Layer always lives under /b1s; the version is the tap's to
+#: choose, not something each customer should carry in their URL.
+SERVICE_LAYER_ROOT = "/b1s"
+DEFAULT_SERVICE_LAYER_VERSION = "v1"
+#: A /b1s or /b1s/vN suffix already present in api_url, which is replaced so
+#: that one setting governs the version for every tenant.
+_SERVICE_LAYER_SUFFIX = re.compile(r"/b1s(?:/v\d+)?/?$", re.IGNORECASE)
 
 def page_offset(value: Any | None) -> int:
     """Validate and normalize an OData offset token."""
@@ -222,20 +227,35 @@ class SAPB1Stream(RESTStream):
 
     @property
     def url_base(self) -> str:
+        """Return the Service Layer root, composing /b1s/<version> itself.
+
+        api_url is the host a customer gives us. The /b1s path is fixed and the
+        version is a property of this tap, so a /b1s or /b1s/vN suffix in
+        api_url is replaced rather than honoured: migrating every tenant to v2
+        is then one setting, not an edit per tenant.
+        """
         value = self.config.get("api_url", "")
         parsed = urlsplit(value)
         if parsed.scheme not in {"http", "https"} or not parsed.netloc:
             raise FatalAPIError("api_url must be an absolute HTTP(S) Service Layer URL")
-        base = value.rstrip("/")
-        if "/b1s/" not in f"{urlsplit(base).path}/":
-            self.logger.warning(
-                "api_url has no Service Layer path; assuming %s. Set api_url to the "
-                "Service Layer root (for example https://host:50000/b1s/v1) to pin "
-                "the version.",
-                DEFAULT_SERVICE_LAYER_PATH,
-            )
-            base = f"{base}{DEFAULT_SERVICE_LAYER_PATH}"
+
+        host = _SERVICE_LAYER_SUFFIX.sub("", value.rstrip("/"))
+        base = f"{host}{SERVICE_LAYER_ROOT}/{self.service_layer_version}"
+        if base != value.rstrip("/"):
+            self.logger.info("Service Layer base URL: %s", base)
         return base
+
+    @property
+    def service_layer_version(self) -> str:
+        """Return the Service Layer version segment, e.g. ``v1``."""
+        value = str(
+            self.config.get("service_layer_version") or DEFAULT_SERVICE_LAYER_VERSION
+        ).strip().strip("/")
+        if not re.fullmatch(r"v\d+", value, re.IGNORECASE):
+            raise FatalAPIError(
+                f"Invalid service_layer_version: {value!r}; expected v1 or v2"
+            )
+        return value.lower()
 
     @property
     def timeout(self) -> int:

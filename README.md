@@ -43,7 +43,9 @@ Cancelled documents are **not** filtered out: cancelling closes a document, so t
 
 `api_url`, `company_db`, `username`, and `password` are required. Keep real config under `.secrets/` (gitignored). Set `ca_bundle` for a private CA. Use `verify_ssl: false` only for an explicitly approved development system.
 
-`api_url` should be the Service Layer root, including the version segment (`/b1s/v1` or `/b1s/v2`). A bare host is accepted and `/b1s/v1` is assumed, with a warning — pin the version yourself when the server offers both.
+`api_url` is the host only, for example `https://sap.example:50000`. The tap composes `/b1s/<service_layer_version>` itself, because `/b1s` is fixed and the version belongs to the tap rather than to a customer: moving every tenant to v2 is then one setting instead of an edit per tenant. A `/b1s` or `/b1s/vN` suffix left in `api_url` is replaced, so tenants onboarded with the full URL keep working and follow the setting too. A path in front of it is preserved, for installations behind a proxy sub-path.
+
+`service_layer_version` defaults to `v1`; set it once for the environment.
 
 ### Tuning throughput
 

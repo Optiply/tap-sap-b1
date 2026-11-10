@@ -61,18 +61,41 @@ class FakeSession:
 
 
 @pytest.mark.parametrize(
-    "api_url,expected",
+    "api_url",
     [
-        ("https://host:50000/b1s/v1", "https://host:50000/b1s/v1"),
-        ("https://host:50000/b1s/v2", "https://host:50000/b1s/v2"),
-        ("https://host:50000/b1s/v1/", "https://host:50000/b1s/v1"),
-        # A bare host used to make every request 404 against /Login.
-        ("https://host:50000", "https://host:50000/b1s/v1"),
-        ("https://host:50000/", "https://host:50000/b1s/v1"),
+        "https://host:50000",
+        "https://host:50000/",
+        # legacy tenants that carry the path, including a different version
+        "https://host:50000/b1s",
+        "https://host:50000/b1s/v1",
+        "https://host:50000/b1s/v2/",
     ],
 )
-def test_url_base_fills_in_a_missing_service_layer_path(api_url, expected):
-    assert stream(api_url=api_url).url_base == expected
+def test_the_service_layer_path_is_composed_not_taken_from_the_tenant(api_url):
+    """One setting governs the version for every tenant."""
+    assert stream(api_url=api_url).url_base == "https://host:50000/b1s/v1"
+    assert (
+        stream(api_url=api_url, service_layer_version="v2").url_base
+        == "https://host:50000/b1s/v2"
+    )
+
+
+def test_a_path_prefix_in_front_of_the_service_layer_is_kept():
+    """Some installations sit behind a proxy on a sub-path."""
+    subject = stream(api_url="https://host/sap/b1s/v1")
+    assert subject.url_base == "https://host/sap/b1s/v1"
+
+
+@pytest.mark.parametrize("version", ["2", "v", "latest", "v2; drop"])
+def test_an_invalid_service_layer_version_is_rejected(version):
+    with pytest.raises(FatalAPIError, match="service_layer_version"):
+        _ = stream(service_layer_version=version).url_base
+
+
+@pytest.mark.parametrize("version", [None, ""])
+def test_an_unset_service_layer_version_falls_back_to_the_default(version):
+    """Hotglue sends empty strings for fields the operator left blank."""
+    assert stream(service_layer_version=version).url_base.endswith("/b1s/v1")
 
 
 def test_url_base_still_rejects_a_non_absolute_api_url():
@@ -177,11 +200,25 @@ def test_closed_document_streams_are_incremental_on_update_date():
         assert stream(stream_type).replication_key == "UpdateDate"
 
 
-def test_open_document_streams_stay_full_table():
-    """Open POs and reserve invoices are snapshots: absence means closed."""
-    for stream_type in (PurchaseOrdersStream, ReservePurchaseInvoicesStream):
+def test_snapshot_streams_stay_full_table():
+    """Reserve invoices and transfer requests are snapshots: absence is the signal."""
+    for stream_type in (ReservePurchaseInvoicesStream, InventoryTransferRequestsStream):
         assert stream(stream_type).replication_key is None
         assert "$filter" in stream(stream_type).get_url_params(None, None)
+
+
+def test_purchase_orders_follow_every_status_change():
+    """Open-only made a closure an absence; UpdateDate makes it an event."""
+    subject = stream(PurchaseOrdersStream)
+    params = subject.get_url_params(None, None)
+
+    assert subject.replication_key == "UpdateDate"
+    # no status filter at all: closed and cancelled orders come through too
+    assert params["$filter"] == "UpdateDate ge '2023-12-25'"
+    assert "bost_" not in params["$filter"]
+    # and the consumer can see what happened to them
+    for field in ("DocumentStatus", "Cancelled", "U_OPT_PO_HeaderID"):
+        assert field in params["$select"]
 
 
 def test_products_replicates_on_sap_update_date_not_the_udf():
@@ -443,3 +480,25 @@ def test_inventory_transfer_requests_only_asks_for_proven_fields():
         "DocumentStatus",
         "StockTransferLines",
     }
+
+
+@pytest.mark.parametrize(
+    "stream_type",
+    [PurchaseOrdersStream, ReservePurchaseInvoicesStream, PurchaseDeliveryNotesStream,
+     SalesOrdersStream],
+)
+def test_document_streams_deliver_update_time(stream_type):
+    """UpdateDate is day-granular; UpdateTime orders changes within a day."""
+    subject = stream(stream_type)
+
+    assert "UpdateTime" in subject.get_url_params(None, None)["$select"]
+    assert "UpdateTime" in subject.schema["properties"]
+
+
+@pytest.mark.parametrize("value", ["14:05:00", 1405])
+def test_update_time_accepts_both_service_layer_shapes(value):
+    """Newer Service Layers return HH:mm:ss, older ones an integer."""
+    subject = stream(PurchaseOrdersStream)
+    record = {"DocEntry": 1, "UpdateDate": "2026-11-09T00:00:00Z", "UpdateTime": value}
+
+    jsonschema.validate(record, subject.schema)

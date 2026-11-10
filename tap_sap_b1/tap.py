@@ -70,6 +70,16 @@ class TapSAPB1(Tap):
             default=300,
             description="Per-request timeout in seconds",
         ),
+        th.Property(
+            "service_layer_version",
+            th.StringType,
+            default="v1",
+            description=(
+                "Service Layer version segment, v1 or v2. Set once for the "
+                "environment: api_url carries the host only, and any /b1s/vN in "
+                "it is replaced by this."
+            ),
+        ),
         th.Property("page_size", th.IntegerType),
         th.Property("page_sizes", th.ObjectType()),
         th.Property("include_warehouse_stock", th.BooleanType, default=True),
