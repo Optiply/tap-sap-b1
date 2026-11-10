@@ -502,3 +502,19 @@ def test_update_time_accepts_both_service_layer_shapes(value):
     record = {"DocEntry": 1, "UpdateDate": "2026-11-09T00:00:00Z", "UpdateTime": value}
 
     jsonschema.validate(record, subject.schema)
+
+
+@pytest.mark.parametrize("stream_type", STREAM_TYPES)
+def test_every_schema_matches_what_its_stream_selects(stream_type):
+    """A column the stream never requests is an empty column in the output."""
+    subject = stream(stream_type)
+    selected = set(subject.select_fields)
+    declared = set(subject.schema["properties"])
+
+    assert declared - selected == set(), (
+        f"{subject.name} declares fields it never selects: {sorted(declared - selected)}"
+    )
+    assert selected - declared == set(), (
+        f"{subject.name} selects fields missing from its schema: "
+        f"{sorted(selected - declared)}"
+    )

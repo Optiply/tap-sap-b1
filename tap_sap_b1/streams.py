@@ -256,7 +256,19 @@ class PurchaseDeliveryNotesStream(SAPB1Stream):
         "UpdateTime",
         "DocumentLines",
     )
-    default_schema = _document_schema
+    #: Its own schema rather than the shared document one: a receipt is read
+    #: for which lines arrived, so the amount and supplier fields a purchase
+    #: order carries are not requested, and declaring them would only produce
+    #: empty columns downstream.
+    default_schema = th.PropertiesList(
+        th.Property("DocEntry", th.IntegerType),
+        th.Property("DocDate", th.DateTimeType),
+        th.Property("DocumentStatus", th.StringType),
+        th.Property("Cancelled", th.StringType),
+        th.Property("UpdateDate", th.DateTimeType),
+        th.Property("UpdateTime", _TIME),
+        th.Property("DocumentLines", th.ArrayType(_document_line)),
+    ).to_dict()
 
 
 class SalesOrdersStream(SAPB1Stream):
