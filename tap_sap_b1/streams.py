@@ -226,14 +226,22 @@ class PurchaseOrdersStream(SAPB1Stream):
 
 
 class ReservePurchaseInvoicesStream(SAPB1Stream):
-    """Open reserve purchase invoices."""
+    """Reserve purchase invoices, including closures and cancellations."""
 
     name = "reserve_purchase_invoices"
     path = "/PurchaseInvoices"
-    fixed_filter = "ReserveInvoice eq 'tYES' and InventoryStatus eq 'bost_Open'"
+    default_replication_key = "UpdateDate"
+    default_lookback = "7d"
     default_primary_keys = ("DocEntry",)
-    select_fields = _DOCUMENT_FIELDS
-    default_schema = _document_schema
+    fixed_filter = "ReserveInvoice eq 'tYES'"
+    select_fields = (*_DOCUMENT_FIELDS, "InventoryStatus")
+    default_schema = {
+        **_document_schema,
+        "properties": {
+            **_document_schema["properties"],
+            "InventoryStatus": {"type": ["string", "null"]},
+        },
+    }
 
 
 class PurchaseDeliveryNotesStream(SAPB1Stream):
