@@ -41,6 +41,11 @@ _document_line = th.ObjectType(
     th.Property("LineTotal", th.NumberType),
     th.Property("WarehouseCode", th.StringType),
     th.Property("ShipDate", th.StringType),
+    th.Property("BaseType", th.IntegerType),
+    th.Property("BaseEntry", th.IntegerType),
+    th.Property("BaseLine", th.IntegerType),
+    th.Property("UnitsOfMeasurment", th.NumberType),
+    th.Property("ActualDeliveryDate", th.StringType),
 )
 
 _stock_transfer_line = th.ObjectType(
